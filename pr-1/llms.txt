@@ -1,5 +1,0 @@
-# OpenShell
-
-> Preview of Podman driver from pimlock/openshell-driver-podman (PR #1, b3c43eb). Only this docset is built here; the rest is at https://pimlock.github.io/openshell-docs/llms.txt.
-
-- [Podman Driver](/openshell-driver-podman/pr-1/drivers/podman/dev/setup.md): Run OpenShell sandboxes as rootless Podman containers on the gateway host.
