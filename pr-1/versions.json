@@ -1,0 +1,20 @@
+{
+  "base": "/openshell-driver-podman/pr-1/",
+  "home": "/openshell-driver-podman/pr-1/drivers/podman/dev/setup/",
+  "docsets": {
+    "driver-podman": {
+      "mount": "drivers/podman",
+      "latest": "dev",
+      "versions": [
+        {
+          "name": "dev",
+          "prefix": "drivers/podman/dev",
+          "first": "drivers/podman/dev/setup",
+          "pages": [
+            "setup"
+          ]
+        }
+      ]
+    }
+  }
+}
