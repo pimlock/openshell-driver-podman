@@ -1,22 +1,21 @@
-# Build a preview of this repo's docs with the shared site theme. Each pull
-# request gets its own preview at https://pimlock.github.io/openshell-driver-podman/pr-<n>/
-# (gh-pages branch) and one comment with the link; closing the pull request
-# removes it. Links into other repos are checked against the live site's
-# link index; see pimlock/openshell-docs. Add the `docs-diff` label to also
-# build a view that marks what changed on each page (experimental).
+# Build a preview of this repo's docs. Runs the pull request's code with a
+# read-only token; docs-preview-deploy.yml publishes the result.
 name: Docs preview
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed, labeled, unlabeled]
     paths: [docs/**]
-  workflow_dispatch:
+
+permissions: {}
 
 jobs:
-  docs:
-    uses: pimlock/openshell-docs/.github/workflows/preview.yml@main
+  build:
+    uses: pimlock/openshell-docs/.github/workflows/preview-build.yml@380a067478f45f20b374a4ae84fbd554c6c713db
     with:
       docset: driver-podman
+      site-ref: 380a067478f45f20b374a4ae84fbd554c6c713db
+      # Every deployment rebuilds the site from these artifacts, so a preview
+      # stays up this long after its last build.
+      retention-days: 30
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read

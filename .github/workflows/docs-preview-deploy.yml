@@ -1,0 +1,204 @@
+# Deploy GitHub Pages (built by Actions, no gh-pages branch) with a preview
+# of every open pull request at /pr-<n>/.
+#
+# A Pages deployment replaces the whole site, so every run rebuilds it from
+# what GitHub records: the open pull requests, each one's newest successful
+# "Docs preview" build on its head commit, and for forks, an approval
+# (docs/preview-approved status written by the approve job). See
+# scripts/preview/compose.sh in pimlock/openshell-docs.
+#
+# Runs after each preview build, when a pull request closes (to drop its
+# preview), daily (to drop expired ones) and by hand. Never runs code from a
+# pull request.
+name: Docs preview deploy
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] never runs PR code; artifacts are verified data
+    workflows: [Docs preview]
+    types: [completed]
+  pull_request_target: # zizmor: ignore[dangerous-triggers] never checks out the pull request
+    types: [closed]
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  SITE_REF: 380a067478f45f20b374a4ae84fbd554c6c713db
+
+jobs:
+  # Which pull request the finished build belongs to (workflow_run only).
+  verify:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      pull-requests: write
+      statuses: write
+    outputs:
+      pr: ${{ steps.verify.outputs.pr }}
+      fork: ${{ steps.verify.outputs.fork }}
+      url: ${{ steps.verify.outputs.url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+    steps:
+      - name: Download the build metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docs-preview-meta
+          path: ${{ runner.temp }}/meta
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Check out the preview scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pimlock/openshell-docs
+          ref: ${{ env.SITE_REF }}
+          path: docs-site
+          sparse-checkout: scripts/preview
+          persist-credentials: false
+      - name: Verify the pull request
+        id: verify
+        run: docs-site/scripts/preview/verify.sh "$RUNNER_TEMP/meta/meta.json"
+      - name: Report progress
+        if: steps.verify.outputs.pr != ''
+        env:
+          PR: ${{ steps.verify.outputs.pr }}
+          FORK: ${{ steps.verify.outputs.fork }}
+        run: |
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$FORK" = true ]; then
+            desc="Built; waiting for approval to publish"
+            msg="Built ${RUN_SHA::7}. This pull request comes from a fork, so a maintainer must approve publishing it in the \`docs-preview-fork\` environment: [workflow run]($run)."
+          else
+            desc="Built; deploying"
+            msg="Built ${RUN_SHA::7}, deploying…"
+          fi
+          docs-site/scripts/preview/status.sh pending "$desc" "$run"
+          printf '**Docs preview**: %s\n' "$msg" > "$RUNNER_TEMP/comment.md"
+          docs-site/scripts/preview/comment.sh "$RUNNER_TEMP/comment.md"
+
+  # A maintainer approves a fork's commit once; the approval is recorded as a
+  # commit status, which later deployments read.
+  approve:
+    needs: verify
+    if: needs.verify.outputs.fork == 'true'
+    runs-on: ubuntu-latest
+    environment: docs-preview-fork
+    permissions:
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Record the approval
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$RUN_SHA" -f state=success -f context=docs/preview-approved \
+            -f description="Approved by $GITHUB_TRIGGERING_ACTOR" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > /dev/null
+
+  compose:
+    needs: [verify, approve]
+    # Also on close, schedule and dispatch, where verify and approve skip.
+    if: ${{ !cancelled() && needs.verify.result != 'failure' && needs.approve.result != 'failure' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: docs-preview-compose
+    permissions:
+      actions: read
+      pull-requests: read
+      statuses: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_WORKFLOW: docs-preview.yml
+    outputs:
+      previews: ${{ steps.compose.outputs.previews }}
+    steps:
+      - name: Check out the preview scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pimlock/openshell-docs
+          ref: ${{ env.SITE_REF }}
+          path: docs-site
+          sparse-checkout: scripts/preview
+          persist-credentials: false
+      - name: Put the site together
+        id: compose
+        run: |
+          docs-site/scripts/preview/compose.sh "$RUNNER_TEMP/site" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "previews=$(jq -c . "$RUNNER_TEMP/site/previews.json")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+          retention-days: 1
+
+  deploy:
+    needs: compose
+    if: ${{ !cancelled() && needs.compose.result == 'success' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: docs-preview-deploy
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # Tell the pull request whether its preview made it into the deployment.
+  report:
+    needs: [verify, approve, compose, deploy]
+    if: ${{ always() && (needs.verify.outputs.pr != '' || github.event_name == 'pull_request_target') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      pull-requests: write
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ needs.verify.outputs.pr || github.event.pull_request.number }}
+      URL: ${{ needs.verify.outputs.url }}
+      RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+      DEPLOY: ${{ needs.deploy.result }}
+      PREVIEWS: ${{ needs.compose.outputs.previews }}
+      CLOSED: ${{ github.event_name == 'pull_request_target' }}
+    steps:
+      - name: Check out the preview scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pimlock/openshell-docs
+          ref: ${{ env.SITE_REF }}
+          path: docs-site
+          sparse-checkout: scripts/preview
+          persist-credentials: false
+      - name: Set the status and comment
+        run: |
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$CLOSED" = true ]; then
+            if [ "$DEPLOY" = success ]; then
+              printf '**Docs preview**: removed, because the pull request is closed.\n' > "$RUNNER_TEMP/comment.md"
+              docs-site/scripts/preview/comment.sh --update-only "$RUNNER_TEMP/comment.md"
+            fi
+            exit 0
+          fi
+          # Deployments are rebuilt from scratch: check this commit made it in.
+          if [ "$DEPLOY" = success ] && jq -e --argjson pr "$PR" --arg sha "$RUN_SHA" 'any(.[]; .pr == $pr and .commit == $sha)' <<<"$PREVIEWS" > /dev/null; then
+            docs-site/scripts/preview/status.sh success "Preview ready" "$URL"
+            msg="$URL
+
+          Built from ${RUN_SHA::7}. Only this repo's docs are built; links to other docs open the live site."
+          else
+            docs-site/scripts/preview/status.sh error "Not deployed ($DEPLOY)" "$run"
+            msg="${RUN_SHA::7} was built but not deployed ($DEPLOY). See the [deploy run]($run)."
+          fi
+          printf '**Docs preview**: %s\n' "$msg" > "$RUNNER_TEMP/comment.md"
+          docs-site/scripts/preview/comment.sh "$RUNNER_TEMP/comment.md"
